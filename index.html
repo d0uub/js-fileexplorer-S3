@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+
+<body>
+    <style type="text/css">
+        body {
+            font-family: Verdana, Arial, Helvetica, sans-serif;
+            position: relative;
+            color: #222222;
+            font-size: 1.0em;
+        }
+
+        html.embed,
+        html.embed body {
+            padding: 0;
+            margin: 0;
+        }
+
+        html.embed p {
+            padding: 0;
+            margin: 0;
+            display: none;
+        }
+
+        #filemanager {
+            /* height: 50vh; */
+            /* max-height: 400px; */
+            position: relative;
+        }
+
+        html.embed #filemanager {
+            height: 100vh;
+        }
+    </style>
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="https://sdk.amazonaws.com/js/aws-sdk-2.904.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <link rel="stylesheet" type="text/css" href="file-explorer.css">
+    <script src="file-explorer.js"></script>
+
+    <div id="filemanager"></div>
+
+    <script type="text/javascript">
+        (async function () {
+            var region
+            var accessKeyId
+            var secretAccessKey
+            var bucket
+            var s3
+            let s3keys = ['region', 'bucket', 'accessKeyId', 'secretAccessKey']
+
+            if (window.location.href.indexOf('embed=true') > -1) document.documentElement.classList.add('embed');
+            var elem = document.getElementById('filemanager');
+            var options = {
+                group: 'demo_test_group',
+                capturebrowser: true,
+                initpath: [['', '']],
+
+                oninitupload: async function (startupload, fileinfo) {
+                    const path = fileinfo.folder.GetPath().map(entry => entry[1]).join('');
+                    let params = {
+                        ACL: 'public-read',
+                        Bucket: bucket,
+                        Key: path + fileinfo.fullPath.slice(1),
+                        Body: fileinfo.file,
+                        ContentDisposition: 'inline'
+                    };
+                    console.log("upload " + path + fileinfo.fullPath.slice(1))
+                    fileinfo.type != 'dir' && await s3.putObject(params).promise()
+                    startupload(true)
+                },
+
+                onfinishedupload: function (finalize, fileinfo) {
+                    finalize(true);
+                },
+
+                oncopy: async function (copied, srcpath, srcids, destfolder) {
+                    const frompath = srcpath.map(entry => entry[1]).join('');
+                    const topath = destfolder.GetPath().map(entry => entry[1]).join('');
+
+                    try {
+                        for (key of (await Promise.all(srcids.map(async id => (await s3.listObjects({ Bucket: bucket, Prefix: id }).promise()).Contents.map(e => e.Key)))).flat()) {
+                            console.log("copy " + topath + key.substring(frompath.length))
+                            await s3.copyObject({ ContentDisposition: 'inline', ACL: 'public-read', Bucket: bucket, CopySource: `/${bucket}/${key}`, Key: topath + key.substring(frompath.length) }).promise()
+                        }
+                    } catch (e) {
+                        console.log(e)
+                    }
+
+                    copied(true, []);
+                },
+
+                onmove: async function (moved, srcpath, srcids, destfolder) {
+                    const frompath = srcpath.map(entry => entry[1]).join('');
+                    const topath = destfolder.GetPath().map(entry => entry[1]).join('');
+
+                    try {
+                        for (key of (await Promise.all(srcids.map(async id => (await s3.listObjects({ Bucket: bucket, Prefix: id }).promise()).Contents.map(e => e.Key)))).flat()) {
+                            console.log("move " + topath + key.substring(frompath.length))
+                            await s3.copyObject({ ContentDisposition: 'inline', ACL: 'public-read', Bucket: bucket, CopySource: `/${bucket}/${key}`, Key: topath + key.substring(frompath.length) }).promise()
+                            await s3.deleteObject({ Bucket: bucket, Key: key }).promise()
+                        }
+                    } catch (e) {
+                        console.log(e)
+                    }
+
+                    moved(true, []);
+                },
+                ondelete: async function (deleted, folder, ids, entries, recycle) {
+                    if (ids.some(id => id.startsWith('Recycle Bin/')) && !confirm('Are you sure to delete these files and folders permanently?')) return false
+
+                    try {
+                        for (key of (await Promise.all(ids.map(async id => (await s3.listObjects({ Bucket: bucket, Prefix: id }).promise()).Contents.map(e => e.Key)))).flat()) {
+                            console.log("delete " + key)
+                            key.startsWith('Recycle Bin/') || await s3.copyObject({ ContentDisposition: 'inline', ACL: 'public-read', Bucket: bucket, CopySource: `/${bucket}/${key}`, Key: "Recycle Bin/" + key }).promise()
+                            await s3.deleteObject({ Bucket: bucket, Key: key }).promise()
+                        }
+                    } catch (e) {
+                        console.log(e)
+                    }
+                    deleted(true);
+
+                },
+                onrename: async function (renamed, folder, entry, newname) {
+                    const path = folder.GetPath().map(entry => entry[1]).join('');
+                    newname += entry.type == 'folder' ? '/' : ''
+                    try {
+                        for (key of (await Promise.all([entry.id].map(async id => (await s3.listObjects({ Bucket: bucket, Prefix: id }).promise()).Contents.map(e => e.Key)))).flat()) {
+                            console.log("rename " + entry.name + " to " + path + newname + key.substring(entry.id.length))
+                            await s3.copyObject({ ContentDisposition: 'inline', ACL: 'public-read', Bucket: bucket, CopySource: `/${bucket}/${key}`, Key: path + newname + key.substring(entry.id.length) }).promise()
+                            await s3.deleteObject({ Bucket: bucket, Key: key }).promise()
+                        }
+                    } catch (e) {
+                        console.log(e)
+                    }
+
+                    renamed({ id: path + newname, name: newname, type: entry.type, hash: path + newname });
+                },
+                onnewfolder: async function (created, folder) {
+                    const path = folder.GetPath().map(entry => entry[1]).join('');
+                    const entry = { name: 'New Folder/', type: 'folder', id: path + 'New Folder/', hash: path + 'New Folder/' };
+                    try {
+                        await s3.putObject({ ACL: 'public-read', Bucket: bucket, Key: entry.id, Body: '' }).promise();
+                        created(entry);
+                    } catch (e) {
+                        console.error(e)
+                    }
+
+                },
+                onopenfile: function (folder, entry) {
+                    const path = folder.GetPath().map(entry => entry[1]).join('');
+                    const url = `https://${bucket}.s3.${region}.amazonaws.com/${path}${entry.name}`;
+                    const newWindow = window.open(url, '_blank');
+                },
+                onrefresh: async function (folder, required) {
+                    const path = folder.GetPath().map(entry => entry[1]).join('');
+                    const data = await s3.listObjects({ Bucket: bucket, Prefix: path, Delimiter: '/' }).promise()
+                    const files = data.Contents.map(e => {
+                        return {
+                            "name": e.Key.substring(path.length), "type": 'file', "id": e.Key, "hash": e.Key,
+                            ...(/\.(jpg|png)$/i.test(e.Key) ? { thumb: `https://${bucket}.s3.${region}.amazonaws.com/${e.Key}` } : {})
+                        }
+                    }).filter(e => e.name.length)
+                    const folders = data.CommonPrefixes.map(e => { return { "name": e.Prefix.substring(path.length), "type": 'folder', "id": e.Prefix, "hash": e.Prefix } })
+                    if (this.IsMappedFolder(folder)) folder.SetEntries([...folders, ...files]);
+
+                },
+            };
+
+            if (!localStorage.secretAccessKey) {
+                promptToken()
+            } else {
+                region = localStorage.region
+                accessKeyId = localStorage.accessKeyId
+                secretAccessKey = localStorage.secretAccessKey
+                bucket = localStorage.bucket
+
+                AWS.config.update({ accessKeyId, secretAccessKey, region });
+                s3 = new AWS.S3();
+
+            }
+
+            async function promptToken() {
+                Swal.fire({
+                    title: 'S3 Login',
+                    html: `<div>Please input S3 bucket information</div>
+                            <input type="text" placeholder="region" id="region" class="swal2-input">
+                            <input type="text" placeholder="bucket" id="bucket" class="swal2-input">
+                            <input type="text" placeholder="accessKeyId" id="accessKeyId" class="swal2-input">
+                            <input type="text" placeholder="secretAccessKey" id="secretAccessKey" class="swal2-input">`,
+                    backdrop: 'rgba(0,0,0,0.4)',
+                    allowOutsideClick: false,
+                    allowEscapeKey: false,
+                    showCancelButton: false,
+                    showCloseButton: false,
+                    focusConfirm: false,
+                    preConfirm: () => {
+                        s3keys.forEach(v => { $('#' + v).val().trim().length == 0 && Swal.showValidationMessage('Please S3 bucket information') })
+                        return s3keys.reduce((acc, value) => ({ ...acc, [value]: $('#' + value).val().trim() }), {});
+                    }
+                }).then((result) => {
+                    Object.entries(result.value).forEach(([key, value]) => localStorage[key] = value);
+                    location.reload()
+                });
+            }
+
+            var fe = new window.FileExplorer(elem, options);
+        })();
+    </script>
+
+</body>
+
+</html>
