@@ -65,6 +65,7 @@
                         Bucket: bucket,
                         Key: path + fileinfo.fullPath.slice(1),
                         Body: fileinfo.file,
+                        ContentType: fileinfo.file.type,
                         ContentDisposition: 'inline'
                     };
                     console.log("upload " + path + fileinfo.fullPath.slice(1))
